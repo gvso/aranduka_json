@@ -1,45 +1,79 @@
 package main
 
 import (
+	"bytes"
 	"encoding/csv"
 	"encoding/json"
-	"flag"
+	"fmt"
+	"io"
 	"log"
+	"net/http"
 	"os"
 	"strconv"
 	"time"
 
 	"github.com/pkg/errors"
+	"github.com/sirupsen/logrus"
 )
 
-func main() {
-	flFile := flag.String("file", "", "the file to convert")
-	flag.Parse()
+func upload(w http.ResponseWriter, req *http.Request) {
+	fmt.Println("here")
+	// 2 MB
+	req.ParseMultipartForm(2 << 20)
 
-	recordFile, err := os.Open(*flFile)
+	file, header, err := req.FormFile("file")
 	if err != nil {
-		log.Fatalf("could not open file: %v", err)
+		fmt.Fprintf(w, "Pedido incorrecto")
+		w.WriteHeader(http.StatusBadRequest)
+
+		logrus.Errorf("Failed to process request: %v\n\n", err)
+		return
+	}
+	defer file.Close()
+
+	fmt.Printf("File name %s\n", header.Filename)
+
+	record, err := extract(file)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		fmt.Fprintf(w, "No se pudo procesar el documento")
+
+		logrus.Errorf("Failed to process file %s: %s\n\n", header.Filename, err)
+		return
 	}
 
-	reader := csv.NewReader(recordFile)
+	recordJson, err := json.Marshal(record)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		fmt.Fprintf(w, "No se pudo procesar el documento")
+
+		logrus.Errorf("Failed to marshal record %s: %s\n\n", header.Filename, err)
+		return
+	}
+
+	w.Header().Set("Content-Disposition", "attachment; filename=aranduka.json")
+	w.Header().Set("Content-Type", "application/json")
+	io.Copy(w, bytes.NewReader(recordJson))
+}
+
+func main() {
+	http.Handle("/", http.FileServer(http.Dir("./static")))
+	http.HandleFunc("/upload", upload)
+
+	port := os.Getenv("PORT")
+	log.Println("Listening on port " + port)
+	log.Fatal(http.ListenAndServe(fmt.Sprintf(":%s", port), nil))
+}
+
+func extract(file io.Reader) (*record, error) {
+	reader := csv.NewReader(file)
 	records, _ := reader.ReadAll()
 	recordStruct, err := toStruct(records)
 	if err != nil {
-		log.Fatalf("failed to convert to struct: %v", err)
+		return nil, errors.Wrap(err, "failed to convert to struct")
 	}
 
-	recordJson, err := json.Marshal(recordStruct)
-	if err != nil {
-		log.Fatalf("failed to marshal json: %v", err)
-	}
-
-	file, err := os.Create("out.json")
-	if err != nil {
-		log.Fatalf("failed to create output file: %v", err)
-	}
-
-	file.WriteString(string(recordJson))
-	file.Close()
+	return recordStruct, nil
 }
 
 func toStruct(records [][]string) (*record, error) {
